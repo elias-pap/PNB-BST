@@ -297,6 +297,7 @@ public class LockFreePBSTMap<K extends Comparable<? super K>, V> {
 
     /**
         Implements the Find operation.
+        <p>
         Precondition: key cannot be null.
 
         @param key  the key whose presence in this map is to be tested
@@ -350,6 +351,7 @@ public class LockFreePBSTMap<K extends Comparable<? super K>, V> {
 
     /**
         Implements the Insert operation.
+        <p>
         Precondition: key cannot be null.
 
         @param key    the key with which the specified value is to be associated
@@ -425,6 +427,7 @@ public class LockFreePBSTMap<K extends Comparable<? super K>, V> {
 
     /**
         Implements the Delete operation.
+        <p>
         Precondition: key cannot be null.
 
         @param key    the key whose mapping is to be removed from the map
@@ -520,11 +523,16 @@ public class LockFreePBSTMap<K extends Comparable<? super K>, V> {
 
     /**
         Implements the RangeScan operation.
-        Preconditions: a and b cannot be null and a is less than or equal to b
+        <p>
+        Preconditions:
+        <ul>
+            <li> a and b cannot be null
+            <li> a is less than or equal to b
+        <ul>
 
         @param a  the lower limit of the range
         @param b  the upper limit of the range
-        @return   all keys in range [a,b]
+        @return   all values of mappings with keys in range [a,b]
     */
     public final Object[] rangeScan(final K a, final K b) {
         int seq = counter.get();    // Get a sequence number
