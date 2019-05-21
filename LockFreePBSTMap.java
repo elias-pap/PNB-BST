@@ -33,13 +33,13 @@ public class LockFreePBSTMap<K extends Comparable<? super K>, V> {
         Represents a PNB-BST node.
     */
     private static final class Node<X extends Comparable<? super X>, Y> {
-        private final X key;                // The unique key of this node.
-        private final Y value;              // Data that map to the key.
-        volatile Node<X,Y> leftChild;       // Reference to the left child of this node.
-        volatile Node<X,Y> rightChild;      // Reference to the right child of this node.
-        private final Node<X,Y> prevNode;   // Reference to the node replaced by this node.
-        volatile Info<X,Y> info;            // Reference to the Info object that this node belongs.
-        private final int versionSeq;       // The sequence number of this node.
+        private X key;                  // The unique key of this node
+        private Y value;                // Data that map to the key
+        volatile Node<X,Y> leftChild;   // Reference to the left child of this node
+        volatile Node<X,Y> rightChild;  // Reference to the right child of this node
+        private Node<X,Y> prevNode;     // Reference to the node replaced by this node
+        volatile Info<X,Y> info;        // Reference to the Info object that this node belongs
+        private int versionSeq;         // The sequence number of this node
 
         /**
             Private constructor. Used by others to create
@@ -106,28 +106,28 @@ public class LockFreePBSTMap<K extends Comparable<? super K>, V> {
 
         // Node whose child pointer will be updated
         // Connects the newNode to the tree
-        private final Node<X,Y> connectorNode;
+        private Node<X,Y> connectorNode;
 
         // Nodes to be deleted (marked nodes)
-        private final Node<X,Y> firstMarkedNode;    // Used in Insert and Delete
-        private final Node<X,Y> secondMarkedNode;   // Used in Delete only
-        private final Node<X,Y> thirdMarkedNode;    // Used in Delete only
+        private Node<X,Y> firstMarkedNode;    // Used in Insert and Delete
+        private Node<X,Y> secondMarkedNode;   // Used in Delete only
+        private Node<X,Y> thirdMarkedNode;    // Used in Delete only
 
         // Saved info references of marked nodes
         // Used as expected values in info CAS
-        private final Info<X,Y> firstMarkedOldInfo;   // Used in Insert and Delete
-        private final Info<X,Y> secondMarkedOldInfo;  // Used in Delete only
-        private final Info<X,Y> thirdMarkedOldInfo;   // Used in Delete only
+        private Info<X,Y> firstMarkedOldInfo;   // Used in Insert and Delete
+        private Info<X,Y> secondMarkedOldInfo;  // Used in Delete only
+        private Info<X,Y> thirdMarkedOldInfo;   // Used in Delete only
 
         // Node to be connected to the tree
         // Can be the Internal of the new triad (on Insert)
         // or the new sibling (on Delete)
         // Used as update value in child CAS
-        private final Node<X,Y> newNode;
+        private Node<X,Y> newNode;
 
         // Sequence number of the Insert or Delete operation
         // Used for handshaking
-        private final int handshakingSeq;
+        private int handshakingSeq;
 
         /**
             Creates an Info object for a Delete operation.
@@ -161,7 +161,7 @@ public class LockFreePBSTMap<K extends Comparable<? super K>, V> {
 
             @param node    the node to check its mark status
         */
-        boolean isMarked(final Node<X,Y> node) {
+        private boolean isMarked(final Node<X,Y> node) {
             return (this.firstMarkedNode == node || this.secondMarkedNode == node || this.thirdMarkedNode == node);
         }
     }
@@ -203,6 +203,33 @@ public class LockFreePBSTMap<K extends Comparable<? super K>, V> {
         @Override
         protected RangeScanResultHolder initialValue() {
             return new RangeScanResultHolder<K,V>();
+        }
+    };
+
+    // Reference to thread local variables that are used by
+    // putIfAbsent to create one new triad per successful call
+    private final ThreadLocal<InsertTriadHolder> insertTriad = new ThreadLocal<InsertTriadHolder>() {
+        @Override
+        protected InsertTriadHolder initialValue() {
+            return new InsertTriadHolder<K,V>();
+        }
+    };
+
+    // Reference to thread local variables that are used by
+    // remove to create one new copy of sibling per successful call
+    private final ThreadLocal<SiblingCopyHolder> siblingCopy = new ThreadLocal<SiblingCopyHolder>() {
+        @Override
+        protected SiblingCopyHolder initialValue() {
+            return new SiblingCopyHolder<K,V>();
+        }
+    };
+
+    // Reference to thread local variable that is used by
+    // executeInsert and executeDelete to reuse info objects
+    private final ThreadLocal<InfoObjectHolder> infoObject = new ThreadLocal<InfoObjectHolder>() {
+        @Override
+        protected InfoObjectHolder initialValue() {
+            return new InfoObjectHolder<K,V>();
         }
     };
 
@@ -294,6 +321,124 @@ public class LockFreePBSTMap<K extends Comparable<? super K>, V> {
         }
     }
 
+    /**
+        Represents a storage space where the new nodes created by putIfAbsent are saved
+        Each thread gets a copy of these variables
+    */
+    private static final class InsertTriadHolder<X extends Comparable<? super X>, Y> {
+        private Node<X,Y> newInternal;
+        private Node<X,Y> newLeaf;
+        private Node<X,Y> newSibling;
+
+        InsertTriadHolder() {
+            newInternal = null;
+            newLeaf = null;
+            newSibling = null;
+        }
+
+        void refreshNewLeaf(final X key, final Y value, final int versionSeq) {
+            refreshLeaf(newLeaf, key, value, versionSeq);
+        }
+
+        void refreshNewSibling(final X key, final Y value, final int versionSeq) {
+            refreshLeaf(newSibling, key, value, versionSeq);
+        }
+
+        void refreshNewInternal(final X key, final Node<X,Y> leftChild, final Node<X,Y> rightChild,
+                                final Node<X,Y> prevNode, final int versionSeq) {
+            newInternal.key = key;
+            newInternal.leftChild = leftChild;
+            newInternal.rightChild = rightChild;
+            newInternal.prevNode = prevNode;
+            newInternal.info = dummy;
+            newInternal.versionSeq = versionSeq;
+        }
+
+        private void refreshLeaf(final Node<X,Y> leaf, final X key, final Y value, final int versionSeq) {
+            leaf.key = key;
+            leaf.value = value;
+            leaf.prevNode = null;
+            leaf.info = dummy;
+            leaf.versionSeq = versionSeq;
+        }
+    }
+
+    /**
+        Represents a storage space where the new node created by remove is saved
+        Each thread gets a copy of this variable
+    */
+    private static final class SiblingCopyHolder<X extends Comparable<? super X>, Y> {
+        private Node<X,Y> newSibling;
+
+        SiblingCopyHolder() {
+            newSibling = null;
+        }
+
+        void refreshInternal(final X key, final Node<X,Y> leftChild, final Node<X,Y> rightChild,
+                                final Node<X,Y> prevNode, final int versionSeq) {
+            newSibling.key = key;
+            newSibling.value = null;
+            newSibling.leftChild = leftChild;
+            newSibling.rightChild = rightChild;
+            newSibling.prevNode = prevNode;
+            newSibling.info = dummy;
+            newSibling.versionSeq = versionSeq;
+        }
+
+        void refreshLeaf(final X key, final Y value, final Node<X,Y> prevNode, final int versionSeq) {
+            newSibling.key = key;
+            newSibling.value = value;
+            newSibling.leftChild = null;
+            newSibling.rightChild = null;
+            newSibling.prevNode = prevNode;
+            newSibling.info = dummy;
+            newSibling.versionSeq = versionSeq;
+        }
+    }
+
+    /**
+        Represents a storage space where the new info object created by executeInsert or executeDelete is saved
+        Each thread gets a copy of this variable
+    */
+    private static final class InfoObjectHolder<X extends Comparable<? super X>, Y> {
+        private Info<X,Y> info;
+        private boolean shallCreateNewInfo;
+
+        InfoObjectHolder() {
+            info = null;
+            shallCreateNewInfo = true;
+        }
+
+        void refreshInsertInfo(final State state, final Node<X,Y> connectorNode, final Node<X,Y> firstMarkedNode,
+                               final Info<X,Y> firstMarkedOldInfo, final Node<X,Y> newNode, final int handshakingSeq) {
+            refreshInfo(state, connectorNode, firstMarkedNode, null, null, firstMarkedOldInfo,
+                        null, null, newNode, handshakingSeq);
+        }
+
+        void refreshDeleteInfo(final State state, final Node<X,Y> connectorNode, final Node<X,Y> firstMarkedNode,
+                               final Node<X,Y> secondMarkedNode, final Node<X,Y> thirdMarkedNode,
+                               final Info<X,Y> firstMarkedOldInfo, final Info<X,Y> secondMarkedOldInfo,
+                               final Info<X,Y> thirdMarkedOldInfo, final Node<X,Y> newNode, final int handshakingSeq) {
+            refreshInfo(state, connectorNode, firstMarkedNode, secondMarkedNode, thirdMarkedNode,
+                        firstMarkedOldInfo, secondMarkedOldInfo, thirdMarkedOldInfo, newNode, handshakingSeq);
+        }
+
+        private void refreshInfo(final State state, final Node<X,Y> connectorNode,
+             final Node<X,Y> firstMarkedNode, final Node<X,Y> secondMarkedNode, final Node<X,Y> thirdMarkedNode,
+             final Info<X,Y> firstMarkedOldInfo, final Info<X,Y> secondMarkedOldInfo, final Info<X,Y> thirdMarkedOldInfo,
+             final Node<X,Y> newNode, final int handshakingSeq) {
+            info.state = state;
+            info.connectorNode = connectorNode;
+            info.firstMarkedNode = firstMarkedNode;
+            info.secondMarkedNode = secondMarkedNode;
+            info.thirdMarkedNode = thirdMarkedNode;
+            info.firstMarkedOldInfo = firstMarkedOldInfo;
+            info.secondMarkedOldInfo = secondMarkedOldInfo;
+            info.thirdMarkedOldInfo = thirdMarkedOldInfo;
+            info.newNode = newNode;
+            info.handshakingSeq = handshakingSeq;
+        }
+    }
 
     /**
         Implements the Find operation.
@@ -360,15 +505,13 @@ public class LockFreePBSTMap<K extends Comparable<? super K>, V> {
                       or null if there was no mapping for the key.
     */
     public final V putIfAbsent(final K key, final V value) {
-        // Get validationResultHolder before the start of making attempts
+        // Get thread local variables before the start of making attempts
         ValidationResultHolder validationResultHolder = validationResult.get();
+        InsertTriadHolder insertTriadHolder = insertTriad.get();
 
         // Search variables
         int seq;
         Node<K,V> ggp = null, gp, p, l;
-
-        // New triad
-        Node<K,V> newInternal, newSibling, newLeaf;
 
         // Start making insert attempts
         while (true) {
@@ -410,17 +553,33 @@ public class LockFreePBSTMap<K extends Comparable<? super K>, V> {
                 // Optimization - extra handshaking check
                 if (counter.get() != seq) continue;
 
-                // Create new triad
-                newLeaf = new Node<K,V>(key, value, null, dummy, seq);
-                newSibling = new Node<K,V>(l.key, l.value, null, dummy, seq);
-                if (l.key == null || key.compareTo(l.key) < 0)
-                    newInternal = new Node<K,V>(l.key, newLeaf, newSibling, l, dummy, seq);
-                else
-                    newInternal = new Node<K,V>(key, newSibling, newLeaf, l, dummy, seq);
+                if (insertTriadHolder.newLeaf == null) {    // Create a new triad
+                    insertTriadHolder.newLeaf = new Node<K,V>(key, value, null, dummy, seq);
+                    insertTriadHolder.newSibling = new Node<K,V>(l.key, l.value, null, dummy, seq);
+                    if (l.key == null || key.compareTo(l.key) < 0)
+                        insertTriadHolder.newInternal = new Node<K,V>(l.key, insertTriadHolder.newLeaf,
+                                                                      insertTriadHolder.newSibling, l, dummy, seq);
+                    else
+                        insertTriadHolder.newInternal = new Node<K,V>(key, insertTriadHolder.newSibling,
+                                                                      insertTriadHolder.newLeaf, l, dummy, seq);
+                }
+                else {  // Refresh the already created triad
+                    insertTriadHolder.refreshNewLeaf(key, value, seq);
+                    insertTriadHolder.refreshNewSibling(l.key, l.value, seq);
+                    if (l.key == null || key.compareTo(l.key) < 0)
+                        insertTriadHolder.refreshNewInternal(l.key, insertTriadHolder.newLeaf,
+                                                             insertTriadHolder.newSibling, l, seq);
+                    else
+                        insertTriadHolder.refreshNewInternal(key, insertTriadHolder.newSibling,
+                                                             insertTriadHolder.newLeaf, l, seq);
+                }
 
                 // Attempt insertion
-                if (executeInsert(p, l, validationResultHolder.gp_p_l_link.pinfo, l.info, newInternal, seq))
+                if (executeInsert(p, l, validationResultHolder.gp_p_l_link.pinfo,
+                                  l.info, insertTriadHolder.newInternal, seq)) {
+                    insertTriad.remove();
                     return null;    // Successful Insert
+                }
             }
         }
     }
@@ -435,15 +594,13 @@ public class LockFreePBSTMap<K extends Comparable<? super K>, V> {
                       or null if there was no mapping for the key.
     */
     public final V remove(final K key) {
-        // Get validationResultHolder before the start of making attempts
+        // Get thread local variables before the start of making attempts
         ValidationResultHolder validationResultHolder = validationResult.get();
+        SiblingCopyHolder siblingCopyHolder = siblingCopy.get();
 
         // Search variables
         int seq;
         Node<K,V> ggp = null, gp, p, l;
-
-        // New node
-        Node<K,V> newSibling;
 
         // Helpers
         Node<K,V> sibling;
@@ -495,17 +652,26 @@ public class LockFreePBSTMap<K extends Comparable<? super K>, V> {
                     // Optimization - extra handshaking check
                     if (counter.get() != seq) continue;
 
-                    // Create new sibling
-                    newSibling = (sibling.leftChild == null) ?
-                                 new Node<K,V>(sibling.key, sibling.value, p, sibling.info, seq) :
-                                 new Node<K,V>(sibling.key, sibling.leftChild, sibling.rightChild, p, sibling.info, seq);
+                    if (sibling.leftChild == null) {    // sibling is a leaf node
+                        if (siblingCopyHolder.newSibling == null)   // Create a new leaf sibling
+                            siblingCopyHolder.newSibling = new Node<K,V>(sibling.key, sibling.value, p, dummy, seq);
+                        else    // Refresh the already created leaf sibling
+                            siblingCopyHolder.refreshLeaf(sibling.key, sibling.value, p, seq);
+                    }
+                    else if (siblingCopyHolder.newSibling == null)  // Create a new internal sibling
+                        siblingCopyHolder.newSibling = new Node<K,V>(sibling.key, sibling.leftChild,
+                                                                     sibling.rightChild, p, dummy, seq);
+                    else    // Refresh the already created internal sibling
+                        siblingCopyHolder.refreshInternal(sibling.key, sibling.leftChild, sibling.rightChild, p, seq);
 
                     if (sibling.leftChild != null) {    // Sibling is Internal, validate its children
-                        validateLink(sibling, newSibling.leftChild, true, validationResultHolder.s_newLeft_link);
+                        validateLink(sibling, siblingCopyHolder.newSibling.leftChild,
+                                     true, validationResultHolder.s_newLeft_link);
                         validated = validationResultHolder.s_newLeft_link.validated;
                         sinfo = validationResultHolder.s_newLeft_link.info;
                         if (validated) {
-                            validateLink(sibling, newSibling.rightChild, false, validationResultHolder.s_newRight_link);
+                            validateLink(sibling, siblingCopyHolder.newSibling.rightChild,
+                                         false, validationResultHolder.s_newRight_link);
                             validated = validationResultHolder.s_newRight_link.validated;
                         }
                     }
@@ -514,8 +680,11 @@ public class LockFreePBSTMap<K extends Comparable<? super K>, V> {
 
                     // Attempt deletion
                     if (validated && executeDelete(gp, p, l, sibling, validationResultHolder.gp_p_l_link.gpinfo,
-                                                   validationResultHolder.gp_p_l_link.pinfo, l.info, sinfo, newSibling, seq))
+                                                   validationResultHolder.gp_p_l_link.pinfo, l.info, sinfo,
+                                                   siblingCopyHolder.newSibling, seq)) {
+                        siblingCopy.remove();
                         return l.value;    // Successful Delete
+                    }
                 }
             }
         }
@@ -699,13 +868,19 @@ public class LockFreePBSTMap<K extends Comparable<? super K>, V> {
         // Optimization - extra handshaking check
         if (counter.get() != seq) return false;
 
-        // Create the Info object
-        final Info<K,V> info = new Info<K,V>(State.NULL, p, l, linfo, newInternal, seq);
+        InfoObjectHolder infoObjectHolder = infoObject.get();
+        if (infoObjectHolder.shallCreateNewInfo)    // Create an info object
+            infoObjectHolder.info = new Info<K,V>(State.NULL, p, l, linfo, newInternal, seq);
+        else    // Refresh existing info object
+            infoObjectHolder.refreshInsertInfo(State.NULL, p, l, linfo, newInternal, seq);
 
         // Perform info flag CAS on p
-        if (p.info == pinfo)   // Optimization check
-            if (infoUpdater.compareAndSet(p, pinfo, info))
-                return help(info);
+        if ((p.info == pinfo) && infoUpdater.compareAndSet(p, pinfo, infoObjectHolder.info)) {
+            infoObjectHolder.shallCreateNewInfo = true;
+            return help(infoObjectHolder.info);
+        }
+        else
+            infoObjectHolder.shallCreateNewInfo = false;
         return false;
     }
 
@@ -756,13 +931,19 @@ public class LockFreePBSTMap<K extends Comparable<? super K>, V> {
         // Optimization - extra handshaking check
         if (counter.get() != seq) return false;
 
-        // Create the Info object
-        final Info<K,V> info = new Info<K,V>(State.NULL, gp, p, l, s, pinfo, linfo, sinfo, newSibling, seq);
+        InfoObjectHolder infoObjectHolder = infoObject.get();
+        if (infoObjectHolder.shallCreateNewInfo)    // Create an info object
+            infoObjectHolder.info = new Info<K,V>(State.NULL, gp, p, l, s, pinfo, linfo, sinfo, newSibling, seq);
+        else    // Refresh existing info object
+            infoObjectHolder.refreshDeleteInfo(State.NULL, gp, p, l, s, pinfo, linfo, sinfo, newSibling, seq);
 
         // Perform info flag CAS on gp
-        if (gp.info == gpinfo)   // Optimization check
-            if (infoUpdater.compareAndSet(gp, gpinfo, info))
-                return help(info);
+        if ((gp.info == gpinfo) && infoUpdater.compareAndSet(gp, gpinfo, infoObjectHolder.info)) {
+            infoObjectHolder.shallCreateNewInfo = true;
+            return help(infoObjectHolder.info);
+        }
+        else
+            infoObjectHolder.shallCreateNewInfo = false;
         return false;
     }
 
